@@ -2,7 +2,7 @@ import pymysql
 
 conn = pymysql.connect(host='localhost',
                        user='root',
-                       password='',
+                       password='1',
                        db='advanced_python')
 
 
