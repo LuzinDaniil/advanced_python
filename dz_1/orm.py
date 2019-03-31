@@ -1,12 +1,13 @@
 import pymysql
+import inspect
 
 conn = pymysql.connect(host='localhost',
                        user='root',
-                       password='lfybkr-007',
+                       password='',
                        db='advanced_python')
 
 
-def query_set(query, outline=None):
+def query_set(query, outline=None, flag=True):
     with conn.cursor() as cursor:
         try:
             cursor.execute(query)
@@ -20,7 +21,7 @@ def query_set(query, outline=None):
         else:
             conn.commit()
             return None
-    if table is None:
+    if table is None and flag==True:
         print('TypeError: Database reset None')
     return table
 
@@ -35,7 +36,10 @@ class Field:
         if value is None and not self.required:
             return None
 
-        # todo exceptions
+        try:
+            self.f_type(value)
+        except:
+            raise TypeError
         return self.f_type(value)
 
 
@@ -70,78 +74,80 @@ class ModelMeta(type):
         if not hasattr(meta, 'table_name'):
             raise ValueError('table_name is empty')
 
-        # todo mro
+        # попытка сделать mro
+        for base in bases:
+            for m in base.__mro__:
+                if m == eval('Model'):
+                    break
+                else:
+                    namespace = {**m.__dict__, **namespace}
+        #
 
         fields = {k: v for k, v in namespace.items()
                   if isinstance(v, Field)}
         namespace['_fields'] = fields
         namespace['_table_name'] = meta.table_name
-        mcs.container = {}
         return super().__new__(mcs, name, bases, namespace)
 
-    # для возможности индексации
-    def __setitem__(self, key, value):
-        self.container[key] = value
+
+class Manage:
+
+    def __init__(self):
+        self.model_cls = None
+        self.list_object = []
+
+    def __get__(self, instance, owner):
+        # if self.model_cls is None:
+        #     self.model_cls = owner
+        self.model_obj = instance
+        self.model_cls = owner
+        return self
 
     def __getitem__(self, item):
-        self.item = item
-        if item >= len(self.container):
-            return None
-        return self.container[item]
+        if type(item) == slice:
+            self.list_object = self.list_object[item]
+        else:
+            self.item = item
+            if item >= len(self.list_object):
+                return None
+            return self.list_object[item]
 
-    # для итерирования
     def __iter__(self):
         self.item = -1
         return self
 
     def __next__(self):
         self.item = self.item + 1
-        if self.item == len(self.container):
+        if self.item == len(self.list_object):
             raise StopIteration
         else:
-            return self.container[self.item]
+            return self.list_object[self.item]
 
-
-class Manage:
-    def __init__(self):
-        self.model_cls = None
-
-    def __get__(self, instance, owner):
-        if self.model_cls is None:
-            self.model_cls = owner
-        self.instance_1 = instance
-        return self
-
-    def all(self, condition=None):
+    def all(self):
         query = 'SELECT * FROM {} '.format(self.model_cls.Meta.table_name)
-        if condition is not None:
-            query = query + " WHERE ({})".format(
-                ' and '.join(y + r"=" + str(x) + r"" if type(x) != str else y + r"='" + x + r"'" for y, x in
-                             condition.items()))
-        if condition is not None:
-            tables = query_set(query, 'one')
-        else:
-            tables = query_set(query, 'many')
-        dict_table = {}
+        tables = query_set(query, 'many')
+        dict_table = {}  # поле и значение объекта
         for table_index in range(len(tables)):
             for key, val in zip(self.model_cls._fields.keys(), tables[table_index]):
                 dict_table[key] = val
-            self.model_cls[table_index] = self.model_cls(**dict_table)
+
+            self.list_object.append(self.model_cls(**dict_table))
             for field_name, field in self.model_cls._fields.items():
                 value = field.validate(dict_table.get(field_name))
-                setattr(self.model_cls[table_index], field_name, value)
-        return self.model_cls
+                setattr(self.list_object[table_index], field_name, value)
+        return self
 
-    def get(self, *args, **kwargs):
-        query = "SELECT * FROM {} WHERE id={}".format(self.model_cls.Meta.table_name, kwargs['id'])
-        table = query_set(query, 'one')
+    def get(self, id, flag=True):
+        kwargs = {}
+        query = "SELECT * FROM {} WHERE id={}".format(self.model_cls.Meta.table_name, id)
+        table = query_set(query, 'one', flag)
         if table is None:
             return None
         for key, val in zip(self.model_cls._fields.keys(), table):
             kwargs[key] = val
         return self.model_cls(**kwargs)
 
-    def create(self, *args, **kwargs):
+    def create(self, **kwargs):
         for field_name, field in self.model_cls._fields.items():
             value = field.validate(kwargs.get(field_name))
             setattr(self.model_cls, field_name, value)
@@ -151,21 +157,65 @@ class Manage:
                 str(x) if type(x) != str else r"'" + x + r"'" for x in kwargs.values()))
         query_set(query)
 
-    def save(self, *args):
+    def save(self):
+        if len(self.list_object) != 0 and self.model_obj is None:  # если не одна, обновить каждую строку
+            for i in self.list_object:
+                i.save()
         field_names = {}
         for field_name in self.model_cls._fields.keys():
             field_names[field_name] = ''
-        if len(self.model_cls) == 0:
+        if self.model_obj is not None:
             for key in field_names.keys():
-                field_names[key] = getattr(self.model_cls, key)
-            query = "UPDATE {} SET {}".format(self.model_cls.Meta.table_name,
-                                              ', '.join(
-                                                  y + r"=" + str(x) if type(x) != str else y + r"='" + x + r"'" for y, x
-                                                  in field_names.items())
-                                              )
-            query = query + " WHERE id={}".format(self.model_cls.id)
-            query_set(query)
+                field_names[key] = getattr(self.model_obj, key)
+        else:
+            return None
+        if self.get(id=self.model_obj.id, flag=False) == None:
+            self.create(**field_names)
+        else:
+            self.update(**field_names)
+
+    def delete(self):
+        if len(self.list_object) != 0 and self.model_obj is None:  # если не одна, удалить каждую строку
+            i = 0
+            while len(self.list_object) != 0:
+                self.list_object[i].delete()
+                del self.list_object[i]
+
+        id_column = self.model_obj.id
+
+        query = "DELETE FROM {} WHERE ({})".format(self.model_cls.Meta.table_name,
+                                                   'id={}'.format(id_column))
+        query_set(query)
+        return None
+
+    def update(self, *_, **kwargs):
+        if len(self.list_object) != 0 and self.model_obj is None:  # если не одна, обновить каждую строку
+            for i in self.list_object:
+                i.update(**kwargs)
+        elif self.model_obj is None:
             return
+        set_value = ', '.join("{}='{}'".format(x, y) if isinstance(y, str) else '{}={}'.format(x, y)
+                              for x, y in kwargs.items())
+        condition = 'id={}'.format(self.model_obj.id)
+        query = "UPDATE {} SET  {} WHERE {}".format(self.model_cls.Meta.table_name, set_value, condition)
+        query_set(query)
+        for field_name, value in kwargs.items():
+            setattr(self.model_obj, field_name, value)
+
+    def filter(self, **kwargs):
+        new_list_object = []
+        for model_obj in self.list_object:
+            for field_name, value in kwargs.items():
+                if getattr(model_obj, field_name) != value:
+                    if model_obj in new_list_object:
+                        new_list_object.remove(model_obj)
+                    break
+                else:
+                    if model_obj in new_list_object:
+                        continue
+                    new_list_object.append(model_obj)
+        self.list_object = new_list_object
+        return self
 
 
 class Model(metaclass=ModelMeta):
@@ -174,41 +224,19 @@ class Model(metaclass=ModelMeta):
 
     objects = Manage()
 
-    # todo DoesNotExist
-
     def __init__(self, *_, **kwargs):
         for field_name, field in self._fields.items():
             value = field.validate(kwargs.get(field_name))
             setattr(self, field_name, value)
 
     def save(self):
-        field_names = {}
-        for field_name in self._fields.keys():
-            field_names[field_name] = ''
-        for key in field_names.keys():
-            field_names[key] = getattr(self, key)
-        query = "INSERT INTO {} ({}) VALUES ({})".format(self.Meta.table_name,
-                                                         ', '.join(str(x) for x in field_names.keys()), ', '.join(
-                str(x) if type(x) != str else r"'" + x + r"'" for x in field_names.values()))
-        query_set(query)
+        return self.objects.save()
 
     def delete(self):
-        id_column = self.id
-        query = "DELETE FROM {} WHERE ({})".format(self.Meta.table_name,
-                                                   'id={}'.format(id_column))
-        query_set(query)
-        for field_name, field in self._fields.items():
-            setattr(self, field_name, None)
+        return self.objects.delete()
 
-    def update(self, *_, **kwargs):
-        id_column = self.id
-        query = "UPDATE {} SET {} WHERE {}".format(self.Meta.table_name,
-                                                   ', '.join(
-                                                       y + r"=" + str(x) if type(x) != str else y + r"='" + x + r"'" for
-                                                       y, x
-                                                       in kwargs.items()), 'id={}'.format(id_column)
-                                                   )
-        query_set(query)
+    def update(self, **kwargs):
+        return self.objects.update(**kwargs)
 
 
 class User(Model):
@@ -221,8 +249,7 @@ class User(Model):
         table_name = 'Users'
 
 
-
-class Man(User):
+class Man(User, Model):
     age = IntField()
 
     class Meta:
@@ -230,32 +257,51 @@ class Man(User):
 
 
 # Создание строки в таблице
-# User.objects.create(id=1, name=12, sex='0', height=180.1)
+# User.objects.create(id=1, name='Иванов', sex=True, height=180.1)
+# User.objects.create(id=2, name='Иванова', sex=False, height=155.0)
+# User.objects.create(id=3, name='Сидоров', sex=True, height=170.5)
+# User.objects.create(id=5, name='Иванов', sex=False, height=160.0)
+
 #
 # Создание экземпляра
 #
-# user = User(id=2, name='Иванова', sex='1', height=147.1)
-# print(user.name)
+# user = User(id=4, name='Петров', sex=True, height=147.1)
+# user.save()
+#
+# user = User(id=4, name='Петров', sex=True, height=147.1)
+# user.name='Change'
 # user.save()
 #
 # Извлечение данных через get
 #
-# user = User.objects.get(id=2)
-# print(user.name)
+# user = User.objects.get(id=4)
+# print(user.__dict__)
+# user.name = 'Change2'
+# user.save()
+# user2 = User.objects.get(id=4)
+# print(user2.__dict__)
+#
+# man = Man.objects.get(id=1)
+# print(man)
+# print(man.__dict__)
 #
 #
 # Извлечение данных через .all()
 #
-user = User.objects.all()
-
-print(user[2].name)
-for i in user:
-    print(i.name)
+# user = User.objects.all()
+# user = user.filter(name='Иванова').filter(id=2).update(name='Иванов')
+# user.filter(name='Change2').delete()
+#
+#
+# users = User.objects.all().filter(name='Иванов')
+#
+# for u in users:
+#     print(u.id, u.name)
 #
 # Метод обновления update()
 #
 # user = User.objects.get(id=1)
-# user.update(name='Change')
+# user.update(name='Change2')
 #
 # для delete
 #
@@ -264,6 +310,5 @@ for i in user:
 #
 
 # man = Man.objects.create(id=1, name=12, sex='0', height=180.1, age=22)
-
 
 conn.close()
