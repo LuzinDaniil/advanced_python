@@ -1,16 +1,20 @@
 import pymysql
-import inspect
+import logging
 
 conn = pymysql.connect(host='localhost',
                        user='root',
                        password='',
                        db='advanced_python')
 
+logging.basicConfig(filename="sample.log", level=logging.INFO, filemode="w")
 
-def query_set(query, outline=None, flag=True):
+
+def query_set(query, value_query, outline=None, flag=True):
     with conn.cursor() as cursor:
         try:
-            cursor.execute(query)
+            logging.info(query)
+            logging.info(value_query)
+            cursor.execute(query, value_query)
         except (pymysql.err.OperationalError, pymysql.ProgrammingError, pymysql.InternalError,
                 pymysql.IntegrityError, TypeError) as err:
             print('Database reset error: ', err.args[1])
@@ -36,6 +40,8 @@ class Field:
         if value is None and not self.required:
             return None
 
+        if self.f_type != type(value) and self.f_type != bool:
+            raise TypeError
         try:
             self.f_type(value)
         except:
@@ -74,14 +80,12 @@ class ModelMeta(type):
         if not hasattr(meta, 'table_name'):
             raise ValueError('table_name is empty')
 
-        # попытка сделать mro
         for base in bases:
             for m in base.__mro__:
                 if m == eval('Model'):
                     break
                 else:
                     namespace = {**m.__dict__, **namespace}
-        #
 
         fields = {k: v for k, v in namespace.items()
                   if isinstance(v, Field)}
@@ -91,58 +95,46 @@ class ModelMeta(type):
 
 
 class Manage:
-
     def __init__(self):
         self.model_cls = None
         self.list_object = []
 
     def __get__(self, instance, owner):
-        # if self.model_cls is None:
-        #     self.model_cls = owner
         self.model_obj = instance
         self.model_cls = owner
         return self
 
-    def __getitem__(self, item):
-        if type(item) == slice:
-            self.list_object = self.list_object[item]
+    def all(self, condition=None):
+        if condition is not None:
+            query_condition = 'WHERE {}'.format(' AND '.join('{}{}%s'.format(i.name, i.operation) for i in condition))
+            value_query = list(i.value for i in condition)
         else:
-            self.item = item
-            if item >= len(self.list_object):
-                return None
-            return self.list_object[item]
-
-    def __iter__(self):
-        self.item = -1
-        return self
-
-    def __next__(self):
-        self.item = self.item + 1
-        if self.item == len(self.list_object):
-            raise StopIteration
-        else:
-            return self.list_object[self.item]
-
-    def all(self):
-        query = 'SELECT * FROM {} '.format(self.model_cls.Meta.table_name)
-        tables = query_set(query, 'many')
+            query_condition = ''
+            value_query = None
+        query = 'SELECT * FROM {} '.format(self.model_cls.Meta.table_name) + query_condition
+        tables = query_set(query, value_query, 'many')
         dict_table = {}  # поле и значение объекта
+        many_model = ManyModel()
         for table_index in range(len(tables)):
             for key, val in zip(self.model_cls._fields.keys(), tables[table_index]):
                 dict_table[key] = val
-
-            self.list_object.append(self.model_cls(**dict_table))
+            many_model.list_model.append(self.model_cls(**dict_table))
             for field_name, field in self.model_cls._fields.items():
                 value = field.validate(dict_table.get(field_name))
-                setattr(self.list_object[table_index], field_name, value)
-        return self
+                setattr(many_model.list_model[table_index], field_name, value)
+        return many_model
 
-    def get(self, id, flag=True):
-        kwargs = {}
-        query = "SELECT * FROM {} WHERE id={}".format(self.model_cls.Meta.table_name, id)
-        table = query_set(query, 'one', flag)
+    def get(self, flag=True, **kwargs):
+        for item in kwargs.keys():
+            if item not in self.model_cls._fields.keys():
+                raise AttributeError
+        query = "SELECT * FROM {} WHERE {}".format(self.model_cls.Meta.table_name,
+                                                   ' AND '.join('{}=%s'.format(x) for x in kwargs.keys()))
+        value_query = list(x for x in kwargs.values())
+        table = query_set(query,value_query, 'one', flag)
         if table is None:
             return None
+        kwargs = {}
         for key, val in zip(self.model_cls._fields.keys(), table):
             kwargs[key] = val
         return self.model_cls(**kwargs)
@@ -153,14 +145,13 @@ class Manage:
             setattr(self.model_cls, field_name, value)
             kwargs[field_name] = value
         query = "INSERT INTO {} ({}) VALUES ({})".format(self.model_cls.Meta.table_name,
-                                                         ', '.join(str(x) for x in kwargs.keys()), ', '.join(
-                str(x) if type(x) != str else r"'" + x + r"'" for x in kwargs.values()))
-        query_set(query)
+                                                         ', '.join(str(x) for x in kwargs.keys()),
+                                                         ', '.join('%s' for _ in range(len(kwargs))))
+        value_query = list(x for x in kwargs.values())
+        query_set(query, value_query)
+        return self.model_cls
 
     def save(self):
-        if len(self.list_object) != 0 and self.model_obj is None:  # если не одна, обновить каждую строку
-            for i in self.list_object:
-                i.save()
         field_names = {}
         for field_name in self.model_cls._fields.keys():
             field_names[field_name] = ''
@@ -174,47 +165,112 @@ class Manage:
         else:
             self.update(**field_names)
 
-    def delete(self):
-        if len(self.list_object) != 0 and self.model_obj is None:  # если не одна, удалить каждую строку
-            i = 0
-            while len(self.list_object) != 0:
-                self.list_object[i].delete()
-                del self.list_object[i]
+    def delete(self, condition=None):
+        if condition is None:
+            query_condition = 'id={}'.format(self.model_obj.id)
+            value_query = None
+        else:
+            query_condition = '{}'.format(' AND '.join('{}{}%s'.format(i.name, i.operation) for i in condition))
+            value_query = list(i.value for i in condition)
+        query = "DELETE FROM {} WHERE ({})".format(self.model_cls.Meta.table_name, query_condition)
+        query_set(query, value_query)
 
-        id_column = self.model_obj.id
+    def update(self, condition=None, **kwargs):
+        try:
+            self_update = self.model_cls
+        except AttributeError:
+            return None
+        if condition is None:
+            query_condition = 'id={}'.format(self.model_obj.id)
+            value_query = []
+        else:
+            query_condition = '{}'.format(' AND '.join('{}{}%s'.format(i.name, i.operation) for i in condition))
+            value_query = list(i.value for i in condition)
+        set_value = ', '.join("{}=%s".format(x) for x in kwargs.keys())
+        value_query_start = list(i for i in kwargs.values())
+        value_query = value_query_start + value_query
 
-        query = "DELETE FROM {} WHERE ({})".format(self.model_cls.Meta.table_name,
-                                                   'id={}'.format(id_column))
-        query_set(query)
-        return None
-
-    def update(self, *_, **kwargs):
-        if len(self.list_object) != 0 and self.model_obj is None:  # если не одна, обновить каждую строку
-            for i in self.list_object:
-                i.update(**kwargs)
-        elif self.model_obj is None:
-            return
-        set_value = ', '.join("{}='{}'".format(x, y) if isinstance(y, str) else '{}={}'.format(x, y)
-                              for x, y in kwargs.items())
-        condition = 'id={}'.format(self.model_obj.id)
-        query = "UPDATE {} SET  {} WHERE {}".format(self.model_cls.Meta.table_name, set_value, condition)
-        query_set(query)
+        query = "UPDATE {} SET  {} WHERE ({})".format(self_update.Meta.table_name, set_value, query_condition)
+        query_set(query, value_query)
         for field_name, value in kwargs.items():
-            setattr(self.model_obj, field_name, value)
+            setattr(self_update, field_name, value)
+        return self
 
     def filter(self, **kwargs):
-        new_list_object = []
-        for model_obj in self.list_object:
-            for field_name, value in kwargs.items():
-                if getattr(model_obj, field_name) != value:
-                    if model_obj in new_list_object:
-                        new_list_object.remove(model_obj)
-                    break
-                else:
-                    if model_obj in new_list_object:
-                        continue
-                    new_list_object.append(model_obj)
-        self.list_object = new_list_object
+        return ManyModel(manage_self=self, **kwargs)
+
+
+class Condition:
+    term_dict = {'lt': '<', 'le': '<=','gt': '>', 'ge': '>='}
+
+    def __init__(self, name, value):
+        if name[-2:] in Condition.term_dict.keys() and name[-4:-2] == '__':
+            self.name = name[:-4]
+            self.operation = Condition.term_dict[name[-2:]]
+            self.value = value
+        else:
+            self.name = name
+            self.operation = '='
+            self.value = value
+
+
+class ManyModel:
+    def __init__(self, manage_self=None, **condition):
+        self.list_model = []
+        self.condition = []
+        self.manage_self = manage_self
+        if condition is not None:
+            self.filter(**condition)
+
+    def __getitem__(self, item):
+        if type(item) == slice:
+            self.list_model = self.list_model[item]
+        else:
+            self.item = item
+            if item >= len(self.list_model):
+                return None
+            return self.list_model[item]
+
+    def __iter__(self):
+        self.item = -1
+        return self
+
+    def __next__(self):
+        self.item = self.item + 1
+        if self.item == len(self.list_model):
+            raise StopIteration
+        else:
+            return self.list_model[self.item]
+
+    def update(self, **kwargs):
+        if self.condition is None:
+            for i in self.list_model:
+                i.update(**kwargs)
+        else:
+            Manage.update(self.manage_self, self.condition, **kwargs)
+            self.condition = None
+        return self
+
+    def delete(self):
+        if self.condition is None:
+            for i in self.list_model:
+                i.delete()
+        else:
+            Manage.delete(self.manage_self, self.condition)
+            self.condition = None
+
+    def save(self):
+        for i in self.list_model:
+            i.save()
+
+    def all(self):
+        if self.condition is None:
+            raise AttributeError
+        return Manage.all(self.manage_self, self.condition)
+
+    def filter(self, **condition):
+        for condition_name, condition_value in condition.items():
+            self.condition.append(Condition(condition_name, condition_value))
         return self
 
 
@@ -257,15 +313,15 @@ class Man(User, Model):
 
 
 # Создание строки в таблице
-# User.objects.create(id=1, name='Иванов', sex=True, height=180.1)
+# create - создание объекта
+#
 # User.objects.create(id=2, name='Иванова', sex=False, height=155.0)
 # User.objects.create(id=3, name='Сидоров', sex=True, height=170.5)
 # User.objects.create(id=5, name='Иванов', sex=False, height=160.0)
-
 #
 # Создание экземпляра
 #
-# user = User(id=4, name='Петров', sex=True, height=147.1)
+# user = User(id=5, name='Петров', sex=True, height=147.1)
 # user.save()
 #
 # user = User(id=4, name='Петров', sex=True, height=147.1)
@@ -274,41 +330,35 @@ class Man(User, Model):
 #
 # Извлечение данных через get
 #
-# user = User.objects.get(id=4)
+# user = User.objects.get(name='Петров', sex='1')
 # print(user.__dict__)
-# user.name = 'Change2'
-# user.save()
-# user2 = User.objects.get(id=4)
-# print(user2.__dict__)
+# user.delete()
 #
 # man = Man.objects.get(id=1)
-# print(man)
 # print(man.__dict__)
 #
 #
 # Извлечение данных через .all()
 #
 # user = User.objects.all()
-# user = user.filter(name='Иванова').filter(id=2).update(name='Иванов')
-# user.filter(name='Change2').delete()
 #
-#
-# users = User.objects.all().filter(name='Иванов')
-#
-# for u in users:
+# user = User.objects.filter(id__gt=1).all()
+# for u in user:
 #     print(u.id, u.name)
+#
 #
 # Метод обновления update()
 #
 # user = User.objects.get(id=1)
-# user.update(name='Change2')
+# user.update(name='Change')
 #
 # для delete
 #
 # user = User.objects.get(id=1)
 # user.delete()
 #
-
 # man = Man.objects.create(id=1, name=12, sex='0', height=180.1, age=22)
 
+# user = User.objects.filter(name='name2').all().update(name='name')
 conn.close()
+
