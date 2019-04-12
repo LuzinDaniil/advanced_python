@@ -17,7 +17,7 @@ def query_set(query, value_query, outline=None, flag=True):
             cursor.execute(query, value_query)
         except (pymysql.err.OperationalError, pymysql.ProgrammingError, pymysql.InternalError,
                 pymysql.IntegrityError, TypeError) as err:
-            print('Database reset error: ', err.args[1])
+            logging.info('Database reset error: ', err.args[1])
         if outline == 'one':
             table = cursor.fetchone()
         elif outline == 'many':
@@ -26,7 +26,7 @@ def query_set(query, value_query, outline=None, flag=True):
             conn.commit()
             return None
     if table is None and flag==True:
-        print('TypeError: Database reset None')
+        logging.info('TypeError: Database reset None')
     return table
 
 
@@ -175,7 +175,7 @@ class Manage:
         query = "DELETE FROM {} WHERE ({})".format(self.model_cls.Meta.table_name, query_condition)
         query_set(query, value_query)
 
-    def update(self, condition=None, **kwargs):
+    def update(self, condition=None,  **kwargs):
         try:
             self_update = self.model_cls
         except AttributeError:
@@ -192,9 +192,13 @@ class Manage:
 
         query = "UPDATE {} SET  {} WHERE ({})".format(self_update.Meta.table_name, set_value, query_condition)
         query_set(query, value_query)
-        for field_name, value in kwargs.items():
-            setattr(self_update, field_name, value)
-        return self
+
+        try:
+            for field_name, value in kwargs.items():
+                setattr(self_update, field_name, value)
+            return self
+        except:
+            return None
 
     def filter(self, **kwargs):
         return ManyModel(manage_self=self, **kwargs)
@@ -243,7 +247,7 @@ class ManyModel:
             return self.list_model[self.item]
 
     def update(self, **kwargs):
-        if self.condition is None:
+        if self.condition is None or self.condition == []:
             for i in self.list_model:
                 i.update(**kwargs)
         else:
@@ -252,7 +256,7 @@ class ManyModel:
         return self
 
     def delete(self):
-        if self.condition is None:
+        if self.condition is None or self.condition == []:
             for i in self.list_model:
                 i.delete()
         else:
@@ -321,7 +325,7 @@ class Man(User, Model):
 #
 # Создание экземпляра
 #
-# user = User(id=5, name='Петров', sex=True, height=147.1)
+# user = User(id=1, name='Петров', sex=True, height=147.1)
 # user.save()
 #
 # user = User(id=4, name='Петров', sex=True, height=147.1)
@@ -349,16 +353,16 @@ class Man(User, Model):
 #
 # Метод обновления update()
 #
-# user = User.objects.get(id=1)
+# user = User.objects.get(id=2)
 # user.update(name='Change')
 #
 # для delete
 #
-# user = User.objects.get(id=1)
+# user = User.objects.get(id=2)
 # user.delete()
 #
 # man = Man.objects.create(id=1, name=12, sex='0', height=180.1, age=22)
 
-# user = User.objects.filter(name='name2').all().update(name='name')
+# user = User.objects.filter(id=4).update(name='Петров')
+# User.objects.filter(id=1).delete()
 conn.close()
-
