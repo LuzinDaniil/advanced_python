@@ -10,10 +10,12 @@ import imgkit
 from threading import Thread
 from jinja2 import Template
 from abc import abstractmethod
+import os
 
 
-vk_session = vk_api.VkApi(token='')
+vk_session = vk_api.VkApi(token=os.environ['TOKEN_VAR'])
 server_addr = vk_session.method('photos.getMessagesUploadServer')['upload_url']
+vk = vk_session.get_api()
 
 options = {
     'format': 'png',
@@ -31,8 +33,7 @@ def generate(user_id):
     img = pyqrcode.create(data_qr)
     # для HTML
     image_as_str = img.png_as_base64_str(scale=10)
-    html_img_cr = '<img src="data:image/png;base64,{}">'.format(image_as_str)
-    html_img = html_template.render(name_qr=html_img_cr)
+    html_img = html_template.render(name_qr=image_as_str)
     fp = BytesIO(imgkit.from_string(html_img, False, options=options))
     result = (user_id, fp)
     return result
@@ -48,12 +49,22 @@ def listen():
                         p.apply_async(generate, args=(event.user_id,), callback=put_queue)
                 else:
                     if event.from_user:  # Если написали в ЛС
-                        q2.put(event.user_id)
+                        q.put((event.user_id, None))
         p.close()
         p.join()
 
 
 class ApiCall:
+    @classmethod
+    def read(cls):
+        while True:
+            user_id, name = q.get()
+            if name is None:
+                MessageApiCall.execute(user_id)
+            else:
+                UploadPhotoApiCall.execute(user_id, name)
+
+
     @abstractmethod
     def execute(self):
         pass
@@ -61,36 +72,31 @@ class ApiCall:
 
 class MessageApiCall(ApiCall):
     @classmethod
-    def execute(cls):
-        while True:
-            user_id = q2.get()
-            send_dict = {
-            'random_id': random.uniform(1, 1_000_000_000),
-            'user_id': user_id,
-            'message': 'Для генерации, нажмите кнопку',
-            'keyboard': open('keyboard.json', "r", encoding="UTF-8").read()
-            }
-            send(send_dict)
-            time.sleep(1)
+    def execute(cls, user_id):
+        send_dict = {
+        'random_id': random.uniform(1, 1_000_000_000),
+        'user_id': user_id,
+        'message': 'Для генерации, нажмите кнопку',
+        'keyboard': open('keyboard.json', "r", encoding="UTF-8").read()
+        }
+        send(send_dict)
+        time.sleep(1)
 
 
 class UploadPhotoApiCall(ApiCall):
     @classmethod
-    def execute(cls):
-        while True:
-            vk = vk_session.get_api()
-            user_id, name = q.get()
-            data = {'photo': ('name.png', name, 'image/png')}
-            req = requests.post(server_addr, files=data).json()
-            c = vk.photos.saveMessagesPhoto(photo=req['photo'], server=req['server'], hash=req['hash'])[0]
-            photo_attachment = 'photo{}_{}_{}'.format(c['owner_id'], c['id'], c['access_key'])
-            send_dict = {
-            'random_id': random.uniform(1, 1_000_000_000),
-            'user_id': user_id,
-            'attachment': photo_attachment
-            }
-            send(send_dict)
-            time.sleep(1)
+    def execute(cls, user_id, name):
+        data = {'photo': ('name.png', name, 'image/png')}
+        req = requests.post(server_addr, files=data).json()
+        c = vk.photos.saveMessagesPhoto(photo=req['photo'], server=req['server'], hash=req['hash'])[0]
+        photo_attachment = 'photo{}_{}_{}'.format(c['owner_id'], c['id'], c['access_key'])
+        send_dict = {
+        'random_id': random.uniform(1, 1_000_000_000),
+        'user_id': user_id,
+        'attachment': photo_attachment
+        }
+        send(send_dict)
+        time.sleep(1)
 
 
 def send(send_dict):
@@ -105,12 +111,10 @@ if __name__ == '__main__':
     f = open('index.html', 'r')
     html_template = Template(f.read())
     f.close()
+
     q = Queue()
-    q2 = Queue()
 
+    execute = Thread(target=ApiCall.read)
 
-    execute1 = Thread(target=MessageApiCall.execute)
-    execute2 = Thread(target=UploadPhotoApiCall.execute)
-    execute1.start()
-    execute2.start()
+    execute.start()
     listen()
