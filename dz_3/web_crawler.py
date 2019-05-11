@@ -5,6 +5,8 @@ import aiohttp
 import urllib.parse
 from lxml import html
 import time
+import asyncpool
+import logging
 
 root_url = 'https://docs.python.org'
 stop_symbols = ['#', 'zip', 'epub', 'bz2', '.io', '/fr/', '/ja/', '/ko/', '/zh-cn/', 'http', ':']
@@ -31,15 +33,20 @@ class Crawler:
         await self.q_url.put(root_url)
         page_first = await self.session.get(root_url)
         await self.q_text.put((BeautifulSoup(await page_first.text(), 'lxml'), root_url))
-        workers = [asyncio.create_task(self.worker_crawl()) for _ in range(self.max_tasks)]
-        workers += [asyncio.create_task(self.worker_elastic()) for _ in range(self.max_tasks)]
-        workers += [asyncio.create_task(self.rps_control())]
-
-        await self.q_url.join()
-        await self.q_text.join()
-
-        for w in workers:
-            w.cancel()
+        async with asyncpool.AsyncPool(loop, num_workers=10, name="workers", logger=logging.getLogger("Workers"),
+                                       worker_co=self.worker_crawl) as pool:
+            await pool.push()
+            async with asyncpool.AsyncPool(loop, num_workers=10, name="workers", logger=logging.getLogger("Workers"),
+                                           worker_co=self.worker_elastic) as pool2:
+                await pool2.push()
+                async with asyncpool.AsyncPool(loop, num_workers=1, name="workers",
+                                               logger=logging.getLogger("Workers"),
+                                               worker_co=self.rps_control) as pool3:
+                    await pool3.push()
+                    await self.q_url.join()
+                    await self.q_text.join()
+                await pool2.join()
+            await pool.join()
 
         await self.session.close()
         await self.es.close()
@@ -52,7 +59,6 @@ class Crawler:
                 await self.q_rps.put(time.time())
             await self.download(url)
             self.q_url.task_done()
-
 
     async def download(self, url):
         try:
