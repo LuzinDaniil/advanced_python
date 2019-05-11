@@ -4,6 +4,7 @@ from aioelasticsearch import Elasticsearch
 import aiohttp
 import urllib.parse
 from lxml import html
+import time
 
 root_url = 'https://docs.python.org'
 stop_symbols = ['#', 'zip', 'epub', 'bz2', '.io', '/fr/', '/ja/', '/ko/', '/zh-cn/', 'http', ':']
@@ -14,9 +15,12 @@ file_extensions = ['.zip', 'epub', '.bz2']
 class Crawler:
     def __init__(self, max_rps):
         self.max_tasks = max_rps
-        self.q = asyncio.Queue()
-        self.q2 = asyncio.Queue()
+        self.q_url = asyncio.Queue()
+        self.q_text = asyncio.Queue()
+        self.q_rps = asyncio.Queue()
         self.seen_urls = set()
+
+        self.sem = asyncio.Semaphore(max_rps)
 
         self.session = None
         self.es = Elasticsearch()
@@ -24,29 +28,31 @@ class Crawler:
     async def crawl(self):
         timeout = aiohttp.ClientTimeout(total=60)
         self.session = aiohttp.ClientSession(timeout=timeout, loop=loop)
-        await self.q.put(root_url)
+        await self.q_url.put(root_url)
         page_first = await self.session.get(root_url)
-        await self.q2.put((BeautifulSoup(await page_first.text(), 'lxml'), root_url))
-        workers = [asyncio.create_task(self.work()) for _ in range(self.max_tasks)]
-        workers2 = [asyncio.create_task(self.work2()) for _ in range(self.max_tasks)]
+        await self.q_text.put((BeautifulSoup(await page_first.text(), 'lxml'), root_url))
+        workers = [asyncio.create_task(self.worker_crawl()) for _ in range(self.max_tasks)]
+        workers += [asyncio.create_task(self.worker_elastic()) for _ in range(self.max_tasks)]
+        workers += [asyncio.create_task(self.rps_control())]
 
-        await self.q.join()
-        await self.q2.join()
+        await self.q_url.join()
+        await self.q_text.join()
 
         for w in workers:
-            w.cancel()
-        for w in workers2:
             w.cancel()
 
         await self.session.close()
         await self.es.close()
 
-    async def work(self):
+    async def worker_crawl(self):
         while True:
-            url = await self.q.get()
+            await self.sem.acquire()
+            url = await self.q_url.get()
+            if url:
+                await self.q_rps.put(time.time())
             await self.download(url)
-            self.q.task_done()
-            await asyncio.sleep(1)
+            self.q_url.task_done()
+
 
     async def download(self, url):
         try:
@@ -60,10 +66,10 @@ class Crawler:
 
         page = BeautifulSoup(response_text, 'lxml')
         links = self.parse_link(response_text, url)
-        self.q2.put_nowait((page, url))
+        self.q_text.put_nowait((page, url))
 
         for link in links.difference(self.seen_urls):
-            self.q.put_nowait(link)
+            self.q_url.put_nowait(link)
         self.seen_urls.update(links)
         response.close()
 
@@ -83,12 +89,12 @@ class Crawler:
                 links.add(urllib.parse.urljoin(url_page, link))
         return links
 
-    async def work2(self):
+    async def worker_elastic(self):
         while True:
-            text_html, url = await self.q2.get()
+            text_html, url = await self.q_text.get()
             await self.add_to_index(text_html, url)
 
-            self.q2.task_done()
+            self.q_text.task_done()
 
     async def add_to_index(self, text_html, url):
         without_tags = self.html_to_text(text_html)
@@ -106,6 +112,15 @@ class Crawler:
             html.script.decompose()
         without_tags = html.get_text(" ", strip=True)
         return without_tags
+
+    async def rps_control(self):
+        while True:
+            time_request = await self.q_rps.get()
+            if time.time()- time_request < 1:
+                await asyncio.sleep(1 - (time.time() - time_request))
+                self.sem.release()
+            else:
+                self.sem.release()
 
 
 loop = asyncio.get_event_loop()
