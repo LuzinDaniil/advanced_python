@@ -1,9 +1,13 @@
 from aioelasticsearch import Elasticsearch
 from aiohttp import web
+import json
+
+with open('config_api.json') as json_data_file:
+    data = json.load(json_data_file)
 
 
 async def aioes_request(request):
-    es = Elasticsearch(["127.0.0.1:9200"])
+    es = Elasticsearch(data['elasticsearch']['hosts'])
     query = request.rel_url.query
     if 'q' in query:
         q = query['q']
@@ -21,10 +25,12 @@ async def aioes_request(request):
                                 'from': offset
                                 }
                           )
-
     urls = [r['_source']['url'] for r in res['hits']['hits']]
     await es.close()
-    return web.Response(text="{}".format(urls))
+    return web.Response(text=json.dumps({'request': q,
+                                         'limit': limit,
+                                         'offset': offset,
+                                         'urls': urls}))
 
 
 def create_app(loop=None):
