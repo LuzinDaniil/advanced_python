@@ -44,15 +44,22 @@ class Crawler:
                 await self.q_rps.join()
                 await self.q_url.join()
                 await self.q_text.join()
+                for p in pool2._workers:
+                    p.cancel()
                 work.cancel()
                 await pool2.join()
+            for p in pool._workers:
+                p.cancel()
             await pool.join()
         await self.session.close()
         await self.es.close()
 
     async def worker_crawl(self):
         while True:
-            url = await self.q_url.get()
+            try:
+                url = await self.q_url.get()
+            except asyncio.CancelledError:
+                break
             await self.sem.acquire()
             async with self.sem:
                 if url:
@@ -97,7 +104,11 @@ class Crawler:
 
     async def worker_elastic(self):
         while True:
-            text_html, url = await self.q_text.get()
+            try:
+                text_html, url = await self.q_text.get()
+            except asyncio.CancelledError:
+
+                break
             await self.add_to_index(text_html, url)
 
             self.q_text.task_done()
