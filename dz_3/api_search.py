@@ -13,8 +13,15 @@ async def aioes_request(request):
         q = query['q']
     else:
         return []
-    limit = query['limit'] if 'limit' in query else 10
-    offset = query['offset'] if 'offset' in query else 0
+    try:
+        limit = int(query['limit']) if 'limit' in query else 10
+    except ValueError:
+        limit = 10
+    try:
+        offset = int(query['offset']) if 'offset' in query else 0
+    except ValueError:
+        offset = 0
+
 
     res = await es.search(index='site.docs.python.org',
                           body={'query':
