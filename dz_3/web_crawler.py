@@ -33,32 +33,32 @@ class Crawler:
         await self.q_url.put(root_url)
         page_first = await self.session.get(root_url)
         await self.q_text.put((BeautifulSoup(await page_first.text(), 'lxml'), root_url))
+
         async with asyncpool.AsyncPool(loop, num_workers=10, name="workers", logger=logging.getLogger("Workers"),
                                        worker_co=self.worker_crawl) as pool:
             await pool.push()
             async with asyncpool.AsyncPool(loop, num_workers=10, name="workers", logger=logging.getLogger("Workers"),
                                            worker_co=self.worker_elastic) as pool2:
                 await pool2.push()
-                async with asyncpool.AsyncPool(loop, num_workers=1, name="workers",
-                                               logger=logging.getLogger("Workers"),
-                                               worker_co=self.rps_control) as pool3:
-                    await pool3.push()
-                    await self.q_url.join()
-                    await self.q_text.join()
+                work = asyncio.ensure_future(self.rps_control())
+                await self.q_rps.join()
+                await self.q_url.join()
+                await self.q_text.join()
+                work.cancel()
                 await pool2.join()
             await pool.join()
-
         await self.session.close()
         await self.es.close()
 
     async def worker_crawl(self):
         while True:
-            await self.sem.acquire()
             url = await self.q_url.get()
-            if url:
-                await self.q_rps.put(time.time())
-            await self.download(url)
-            self.q_url.task_done()
+            await self.sem.acquire()
+            async with self.sem:
+                if url:
+                    await self.q_rps.put(time.time())
+                await self.download(url)
+                self.q_url.task_done()
 
     async def download(self, url):
         try:
@@ -122,11 +122,10 @@ class Crawler:
     async def rps_control(self):
         while True:
             time_request = await self.q_rps.get()
-            if time.time()- time_request < 1:
-                await asyncio.sleep(1 - (time.time() - time_request))
-                self.sem.release()
-            else:
-                self.sem.release()
+            async with self.sem:
+                if time.time() - time_request < 1:
+                    await asyncio.sleep(1 - (time.time() - time_request))
+                self.q_rps.task_done()
 
 
 loop = asyncio.get_event_loop()
