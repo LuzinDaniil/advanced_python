@@ -91,8 +91,11 @@ async def singup(request):
         except:
             raise web.HTTPPreconditionFailed(text='Неправильные значения параметров')
         res = await AuthMS.make_request('singup', data={'email': email, 'password': password, 'name': name})
+        res_dict = json.loads(res)
+        if res_dict['status'] == 'error':
+            raise web.HTTPBadRequest(body=res)
     else:
-        raise web.HTTPPreconditionFailed(text='Неправльные параметры')
+        raise web.HTTPBadRequest(text='Неправльные параметры')
     return web.Response(body=res)
 
 
@@ -105,6 +108,9 @@ async def login(request):
         except:
             raise web.HTTPPreconditionFailed(text='Неправильные значения параметров')
         res = await AuthMS.make_request('login', data={'email': email, 'password': password})
+        res_dict = json.loads(res)
+        if res_dict['status'] == 'error':
+            raise web.HTTPBadRequest(body=res)
     else:
         raise web.HTTPPreconditionFailed(text='Неправльные параметры')
     return web.Response(text=res)
@@ -130,6 +136,9 @@ async def current(request):
     if 'X-Token' in request.headers:
         token = request.headers['X-Token']
         res = await AuthMS.make_request('current', data={'token': token})
+        res_dict = json.loads(res)
+        if res_dict['status'] == 'error':
+            raise web.HTTPBadRequest(body=res)
     else:
         raise web.HTTPForbidden(text='forbidden')
     return web.Response(text=res)
